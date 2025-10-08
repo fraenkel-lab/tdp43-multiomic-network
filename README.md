@@ -7,7 +7,7 @@
 
 Analysis code and data accompanying our preprint: 
 
->Kozareva V, Liu Z, Blake K, Qi YA, Rollinson S, Seddighi S, Alsaidi M, Tsitkov S, Prudencio M, Petrucelli L, Dickson DW, Brown AL, Fratta P, Kim HJ, Taylor JP, Ward ME, Fraenkel E<sup>\*</sup>, Kargbo-Hill SE<sup>\*</sup>. Integrative multi-omic analysis links TDP-43-driven splicing defects to cascading proteomic disruption of ALS/FTD pathways. bioRxiv. DOI: XXX.
+>Kozareva V, Liu Z, Blake K, Qi YA, Rollinson S, Seddighi S, Alsaidi M, Tsitkov S, Prudencio M, Petrucelli L, Dickson DW, Brown AL, Fratta P, Kim HJ, Taylor JP, Ward ME, Fraenkel E<sup>\*</sup>, Kargbo-Hill SE<sup>\*</sup>. Integrative multi-omic analysis links TDP-43-driven splicing defects to cascading proteomic disruption of ALS/FTD pathways. bioRxiv. DOI: https://doi.org/10.1101/2025.09.29.679403.
 
 ---
 
