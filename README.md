@@ -11,6 +11,6 @@ Analysis code and data accompanying our preprint:
 
 ---
 
-Code (Python and R) to reproduce main figures available in notebook format in subdirectories. 
+Code (Python and R) to reproduce main figures available in notebook format in `figures`. 
 
 Scripts for differential and network analyses (used to generate intermediate data files in `data`) TBA. 
