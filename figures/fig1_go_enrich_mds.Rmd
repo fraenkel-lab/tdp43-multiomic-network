@@ -1,0 +1,242 @@
+---
+title: "iNeuron pathway enrichment clustering (Fig 1)"
+author: "Velina Kozareva"
+date: "2025-8-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Global options
+knitr::opts_chunk$set(fig.width = 10, fig.height = 6, dpi = 300, echo = TRUE)
+
+# Packages
+library(here)             # relative paths
+library(dplyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(ggtangle)
+library(igraph)
+library(ggrepel)
+library(clusterProfiler)  # for similarity between terms
+```
+
+## Multi dimensional scaling on pathways enriched in iNeuron DEP sets
+
+```{r data}
+
+source(here("..", "utilities", "R", "de_enrichment_utils.R"))
+
+path_deps = here("..", "data", "supp_tables", "table_S1_de_ds_ineurons.tsv")
+path_dep_set_enrichment = here("..", "data", "supp_tables", "table_S3_ineuron_dep_enrichment.tsv")
+
+dep_enrichment = read_tsv(path_dep_set_enrichment, show_col_types = F)
+
+# Filter down to just pathways that meet jaccard similarity threshold 
+# and drop duplicates across sets
+dep_enrichment = dep_enrichment %>% 
+  filter(included_Fig1_filtering) %>%
+  mutate(minlogq = -log10(qvalue)) %>%
+  group_by(ID) %>% 
+  slice_max(minlogq, n = 1) %>%
+  ungroup()
+
+
+table_deps = read_tsv(path_deps, show_col_types = F)
+```
+
+``` {r helpers} 
+
+pairwise_termsim.df <- function(df, geneSets, method = "JC", semData = NULL, showCategory = 200) {
+  y <- as.data.frame(df)
+  n = showCategory
+  if (is.numeric(n)) {
+    y <- y[1:n, ]
+  } else {
+    y <- y[match(n, y$Description),]
+    n <- length(n)
+  }
+  
+  termsim <- enrichplot:::get_similarity_matrix(y = y, geneSets = geneSets, method = method,
+                                     semData = semData)
+  return(termsim)
+}
+```
+
+``` {r enrichment}
+
+qval_threshold = 0.1
+overlap_threshold = 0.5
+
+msig_c5 = msigdbr(species = "Homo sapiens", category = "C5") %>%
+  filter(gs_subcat != "HPO") %>%
+  select(gs_name, gene_symbol, gs_subcat, gs_exact_source)
+
+go_enrich_results_ds_de = list()
+geneSets_all = list()
+
+dep_groups = c('DEP + DS', 'DEP + DEG, no DS', 'DEP only')
+
+# original code for generating group wise results
+for (gs_name in dep_groups) {
+  if (!is.na(gs_name)) {
+    print(gs_name)
+    table_deps_up = table_deps %>% filter(Fig1_plot_group == gs_name & log2FC_prot > 0)
+    table_deps_down = table_deps %>% filter(Fig1_plot_group == gs_name & log2FC_prot < 0)
+    
+    # print(nrow(table_deps_up))
+    # print(nrow(table_deps_down))
+    
+    # upregulated 
+    enriched_up <- clusterProfiler::enricher(table_deps_up$gene_name, 
+                                             TERM2GENE = msig_c5, 
+                                             universe = table_deps$gene_name,
+                                             minGSSize = 10,
+                                             maxGSSize = 500, qvalueCutoff = qval_threshold)
+    
+    # Add gene sets
+    if (length(geneSets_all) == 0) {
+      geneSets_all = c(geneSets_all, enriched_up@geneSets)
+    } else {
+      newsets = setdiff(names(enriched_up@geneSets), names(geneSets_all))
+      geneSets_all[newsets] = enriched_up@geneSets[newsets]
+    }
+    
+    enriched_up = enriched_up@result
+    # print(dim(enriched_up[enriched_up$qvalue < qval_threshold,]))
+    enriched_up = enriched_up %>% 
+      mutate(Direction = 'upregulated') %>%
+      filter(qvalue < qval_threshold) %>% 
+      filterRedundantGenesets(overlap_threshold = overlap_threshold)
+    
+    enriched_down <- clusterProfiler::enricher(table_deps_down$gene_name, 
+                                               TERM2GENE = msig_c5, 
+                                               universe = table_deps$gene_name,
+                                               minGSSize = 10,
+                                               maxGSSize = 500, qvalueCutoff = qval_threshold)
+    
+    # Add new genesets
+    newsets = setdiff(names(enriched_down@geneSets), names(geneSets_all))
+    geneSets_all[newsets] = enriched_down@geneSets[newsets]
+    
+    enriched_down = enriched_down@result
+    # print(dim(enriched_down[enriched_down$qvalue < qval_threshold,]))
+    enriched_down = enriched_down %>% 
+      mutate(Direction = 'downregulated') %>%
+      filter(qvalue < qval_threshold) %>% 
+      filterRedundantGenesets(overlap_threshold = overlap_threshold)
+    
+    go_enrich_results_ds_de[[gs_name]] = rbind(enriched_up, enriched_down) %>% 
+      mutate(Source_Set = gs_name)
+  }
+ 
+}
+```
+
+```{r enrichment2}
+
+dep_enrichment2 = Reduce(rbind, go_enrich_results_ds_de) %>%
+  mutate(minlogq = -log10(qvalue)) %>%
+  group_by(ID) %>% 
+  slice_max(minlogq, n = 1) %>%
+  ungroup()
+
+# this should match saved table
+dim(dep_enrichment2)
+
+```
+
+``` {r compute_similarity}
+
+# only includes upper triangle 
+method = 'JC'
+# for other methods, need to account for hierarchical structure (like with GOSemSim)
+# hard to do when have combined three GO categories into one
+test_sim <- pairwise_termsim.df(dep_enrichment2, geneSets_all, 
+                                showCategory = nrow(dep_enrichment2), 
+                                method = method)
+
+# convert to full matrix 
+full_sim = test_sim                           
+full_sim[lower.tri(full_sim)]  = t(full_sim)[lower.tri(full_sim)]             
+diag(full_sim) = 1
+
+```
+
+```{r mds_graph}
+
+min_edge = 0.1
+test_graph = enrichplot:::build_emap_graph(enrichDf = dep_enrichment2, geneSets = geneSets_all,
+                                           color = 'Source_Set', cex_line = 1, min_edge = min_edge,
+                                           pair_sim = test_sim, method = method)
+# print(test_graph)
+
+gs = geneSets_all[dep_enrichment2$ID]
+names(gs) <- dep_enrichment2$Description
+
+g <- test_graph
+
+# size is significance of enrichment
+size = as.numeric(dep_enrichment2$minlogq)
+names(size) = dep_enrichment2$Description
+V(g)$size = size[V(g)$name]
+
+dep_enrichment2$Source_Set = factor(dep_enrichment2$Source_Set,
+                                    levels = c('DEP + DS', 
+                                               'DEP + DEG, no DS',
+                                               'DEP only'))
+
+color_edge = 'grey'
+size_edge = 0.05
+
+# --- palette -----------------------------------------------------------------
+set_cols <- c(
+  'DEP + DS'         = "#B22222",  # brick-red
+  'DEP + DEG, no DS' = "#20B2AA",  # turquoise
+  'DEP only'  = "#FFA500"   # orange-yellow
+)
+
+# for reproducibility
+set.seed(1)
+exp <- 0.5
+p <- ggplot(g, layout = 'mds', dist = (1-full_sim)^exp) + geom_edge(color = color_edge, 
+                                                                    size = size_edge, alpha = 0.5)
+color = 'Source_Set'
+size_category = 1
+p <- p %<+% dep_enrichment2[, c("Description", color)] + 
+  geom_point(aes(color=.data[[color]], size=.data$size), alpha = 0.8) + 
+  scale_size(range=c(1, 10) * size_category, name = "-log10(q-value)")
+
+# manual colour scale for the three ordered categories
+p = p + scale_color_manual(values = set_cols, guide = "legend") +
+  
+  # legend tweaks
+  guides(
+    color = guide_legend(
+      title = NULL,               # no title for Source_Set
+      override.aes = list(size = 6)  # bigger dots in that legend
+    ),
+    size  = guide_legend(order = 1)  
+  ) +
+  
+  coord_equal() +
+  theme(text = element_text(size = 14))
+
+# Note final figure has been rotated 90 deg
+print(p)
+
+```
+``` {r mds_text}
+
+# Another version with all text labels (just for reference)
+p = p + 
+  # xlim(c(-100, 100)) + ylim(c(-100, 100)) +
+  geom_text_repel(aes(x=.data$x, y = .data$y, label=.data$label), data = p$data, 
+                        max.overlaps = 50, min.segment.length = 0, size = 1.5)
+
+
+
+print(p)
+
+```
+

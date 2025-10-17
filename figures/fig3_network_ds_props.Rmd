@@ -1,0 +1,78 @@
+---
+title: "Network DS characterization (Fig 3)"
+author: "Velina Kozareva"
+date: "2025-9-1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Global options
+knitr::opts_chunk$set(fig.width = 10, fig.height = 6, dpi = 300, echo = TRUE)
+
+# Packages
+library(here)        
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+```
+
+## Network analysis plots for Figure 3
+
+```{r data}
+
+path_nodes_table = here("..", "data", "supp_tables", "table_S11_network_nodes.tsv")
+nodes_table = read_tsv(path_nodes_table, show_col_types = FALSE)
+```
+
+
+```{r ds_count}
+enrich_tbl <- nodes_table %>%                             
+  mutate(is_DS = gene_DS_status == "DS") %>%     
+  count(leiden_clusters, is_DS) %>%               
+  pivot_wider(names_from = is_DS,
+              values_from = n,
+              values_fill = 0) %>%                
+  rename(DS   = `TRUE`,
+         NoDS = `FALSE`) %>%
+  left_join(nodes_table[,c('leiden_clusters', 'meta_cluster')], by = 'leiden_clusters') %>%
+  distinct() %>%
+  mutate(ratio_DS = DS / (DS + NoDS)) 
+```
+
+
+### Plot ratios
+```{r plot}
+p = enrich_tbl %>%
+  arrange(desc(ratio_DS)) %>%
+  mutate(leiden_clusters = factor(leiden_clusters,
+                                  levels = leiden_clusters)) %>%
+  ggplot(
+       aes(x = leiden_clusters,
+           y = ratio_DS,
+           fill = meta_cluster)) +
+  geom_col(width = 0.8, color = "black") +
+  scale_fill_manual(values = c(
+    'Nuclear/RBP/TF' = "#CC5EA3", 
+    'Synaptic/ neuron' = "#AEE2F8",
+    'Autophagy' = "#39B54A",
+    'Metabolism' = '#FFDE17'
+  ),
+  guide = guide_legend(title = "meta_cluster")) +
+  labs(x = "Network cluster",
+       y = "Prop. of DS genes") +
+  ylim(c(0, 0.28)) +
+  theme_bw(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+print(p)
+
+# ggsave(
+#   filename = here("fig3_ds_ratios.pdf"),
+#   plot     = p,
+#   width    = 5, height = 4, units = "in", device = cairo_pdf
+# )
+
+```
+

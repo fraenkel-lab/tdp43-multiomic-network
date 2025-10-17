@@ -1,0 +1,158 @@
+---
+title: "DE analysis of C9 FTLD postmortem proteomics (Fig. 4)"
+author: "Velina Kozareva"
+date: "2025-9-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Global options
+knitr::opts_chunk$set(fig.width = 10, fig.height = 6, dpi = 300, echo = TRUE)
+
+# Packages
+library(here)             # relative paths
+library(dplyr)
+library(readr)
+library(ggplot2)
+```
+
+## DE results and utilities
+
+```{r data}
+source(here("..", "utilities", "R", "plotting_utils.R"))
+
+path_c9ftld_proteomics      = here("..", "data", "de_postmortem", "c9ftld_prot_de_res.csv")
+path_in_proteomics      = here("..", "data", "de_ds_ineurons", "ineurons_prot_de_res.csv")
+path_splicing_comp      = here("..", "data", "supp_tables", "table_S6_splicing_compendium.tsv")
+
+# C9 FTLD differential results (limma)
+c9_ftld_de = read.csv(path_c9ftld_proteomics, row.names = 1)
+
+# iNeuron differential results
+in_proteomics = read.csv(path_in_proteomics)
+
+# Splicing data
+splicing_compendium = read_tsv(path_splicing_comp, show_col_types = FALSE)
+
+```
+
+
+## Generate volcano plots
+
+```{r volcano}
+ds_ours = splicing_compendium %>% filter(
+  misspliced__iN_TDP43KD_ours == TRUE
+)
+
+de_ds_genes = c9_ftld_de %>% dplyr::filter(
+  adj.P.Val < 0.05 & lead_protein_name %in% ds_ours$gene_name
+)
+
+# DS genes to highlight
+genes_mark = c('KALRN', 'PTPRT', 
+               'ARHGAP32',   # maybe exclude if we don't really emphasize otherwise
+               'PFKP', 'DNM1', 'KIF1A', 'MADD', 'MYO18A', 
+               'ATG4B', 'TLN2',
+               'ITGA7', 'TCEA1'
+)
+
+genes_mark = c(genes_mark, de_ds_genes[(de_ds_genes$logFC < -1.2 | de_ds_genes$logFC > 1) &
+                                         de_ds_genes$adj.P.Val < 0.0001,
+                                       'lead_protein_name'])
+
+vplot = volcano_limma(c9_ftld_de, using_uniprot = F, 
+                      names_from_column = 'lead_protein_name',
+                      adjp_threshold = 0.05, 
+                      abslogfc_threshold = 0.5, # set this threshold just for plotting
+                      always_label = genes_mark,
+                      color_black = de_ds_genes$lead_protein_name,
+                      # always_label_box = F,
+                      max_overlaps = 20,
+                      label_size = 5,
+                      shadow_colour = 'grey50'
+) 
+
+print(vplot)
+
+# ggsave(
+#   filename = here("fig4_c9ftld_volcano_B.pdf"),
+#   plot = print(vplot),
+#   width = 7, height = 7, units = "in", device = cairo_pdf
+# )
+
+```
+## Compare C9 FTLD DE results with DE proteins from TDP43-KD iNeurons
+
+```{r comparison}
+
+shared_prots = intersect(c9_ftld_de$lead_protein_name, in_proteomics$external_gene_name)
+print(paste0(length(shared_prots), ' proteins quantified in both analyses'))
+
+merged_proteomics = merge(in_proteomics, c9_ftld_de, by.x = 'external_gene_name',
+                          by.y = 'lead_protein_name',
+                          suffixes = c('__iNeuron', '__C9_FTLD'))
+
+merged_prot_both_de = merged_proteomics %>%
+  filter(
+    adj.P.Val__iNeuron < 0.05 & adj.P.Val__C9_FTLD < 0.05
+  ) %>% mutate(
+    concordance = ifelse(logFC__iNeuron*logFC__C9_FTLD > 0, 'concordant', 'discordant')
+  ) %>% mutate(
+    direction = case_when(
+      external_gene_name %in% de_ds_genes$lead_protein_name ~ 'DS', 
+      concordance == 'concordant' & logFC__iNeuron > 0 ~ 'POS',
+      concordance == 'concordant' & logFC__iNeuron < 0 ~ 'NEG',
+      TRUE ~ 'MIXED'
+    ),
+    direction_simple = case_when(
+      concordance == 'concordant' & logFC__iNeuron > 0 ~ 'POS',
+      concordance == 'concordant' & logFC__iNeuron < 0 ~ 'NEG',
+      TRUE ~ 'MIXED'
+    ),
+    ds = case_when(
+      external_gene_name %in% de_ds_genes$lead_protein_name ~ 'DS',
+      TRUE ~ 'No DS'
+    )
+  )
+
+comp_plot = ggplot(merged_prot_both_de, aes(x = logFC__iNeuron,
+                                            y = logFC__C9_FTLD,
+                                            label = external_gene_name, color = direction)) +
+  geom_point(size = 2) + 
+  scale_colour_manual(values = c(MIXED = "lavender", POS = "red", NEG = "blue", DS = 'black')) +
+  geom_text_repel(max.overlaps = 10, 
+                  size = 5, 
+                  min.segment.length = 0,
+                  show.legend =F) + 
+  geom_vline(xintercept = 0, linetype = 'dashed') + 
+  geom_hline(yintercept = 0, linetype='dashed') +
+  xlab('log2FC (i3Neuron TDP-43 KD vs. control)') +
+  ylab('log2FC (C9 FTLD vs. healthy control)') +
+  theme_bw() + theme(text = element_text(size = 15),
+                     legend.position='none')
+
+comp_plot
+
+# ggsave(
+#   filename = here("fig4_c9ftld_ineuron_dep_concordance_C.pdf"),
+#   plot = print(comp_plot),
+#   width = 8, height = 7, units = "in", device = cairo_pdf
+# )
+
+```
+
+## how much concordance?
+
+```{r concordance}
+
+print(nrow(merged_prot_both_de))
+# 191 shared DEPs
+
+# quadrants
+print(table(merged_prot_both_de$concordance, merged_prot_both_de$direction))
+
+# how many of the downregulated concordant DEPs also have DS?
+print(table(merged_prot_both_de$ds, merged_prot_both_de$direction_simple))
+# 26
+
+```

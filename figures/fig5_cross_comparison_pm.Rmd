@@ -1,0 +1,542 @@
+---
+title: "Postmortem and iNeuron pathway enrichment (Fig. 5)"
+author: "Velina Kozareva"
+date: "2025-8-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Global options
+knitr::opts_chunk$set(fig.width = 10, fig.height = 6, dpi = 300, echo = TRUE)
+
+# Packages
+library(here)             # relative paths
+library(dplyr)
+library(readr)
+library(stringr)
+library(forcats)
+library(ggplot2)
+library(cowplot)
+library(msigdbr)
+library(clusterProfiler)  # used by get_enriched_terms helper
+```
+
+## Utilities and data
+
+```{r utilities}
+source(here("..", "utilities", "R", "plotting_utils.R"))
+source(here("..", "utilities", "R", "de_enrichment_utils.R"))
+
+path_table_network      = here("..", "data", "supp_tables", "table_S12_network_enrichment.tsv")
+path_table_pm_pathways  = here("..", "data", "supp_tables", "table_S16_postmortem_enrichment.tsv")
+path_in_proteomics      = here("..", "data", "de_ds_ineurons", "ineurons_prot_de_res.csv")
+path_in_rnaseq          = here("..", "data", "de_ds_ineurons", "ipsc_tdp43_kd_deseq2_differential_gene_expression_nodups.csv")
+path_nodes_table        = here("..", "data", "supp_tables", "table_S11_network_nodes.tsv")
+path_splicing_comp      = here("..", "data", "supp_tables", "table_S6_splicing_compendium.tsv")
+path_table_pm_de        = here("..", "data", "supp_tables", "table_S15_postmortem_de.tsv")
+```
+
+```{r data}
+# Network enrichment table (clusterProfiler output aggregated at table level)
+table_network = read_tsv(path_table_network, show_col_types = FALSE)
+
+# Postmortem pathway enrichments (already aggregated across datasets)
+pm_enrichment = read_tsv(path_table_pm_pathways, show_col_types = FALSE)
+
+# iNeuron differential results (for enrichment)
+in_proteomics = read_csv(path_in_proteomics, show_col_types = FALSE)
+in_rnaseq     = read_csv(path_in_rnaseq,     show_col_types = FALSE)
+
+```
+
+## Filter network pathways
+
+``` {r filter}
+# Keep only cluster-specific entries (drop "Full_Network")
+net_clusters_only = table_network %>% filter(Cluster != "Full_Network")
+
+# For repeated pathways (same Description across clusters), keep the one with min qvalue
+net_clusters_min = net_clusters_only %>%
+  group_by(Description) %>%
+  slice_min(order_by = qvalue, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(Count >= 3) 
+```
+
+## Add iNeuron enrichment
+```{r ineuron_enrich}
+# Use msigdb GO terms, no HP terms
+msig_c5 = msigdbr(species = "Homo sapiens", category = "C5") %>%
+  filter(gs_subcat != "HPO") %>%
+  select(gs_name, gene_symbol, gs_subcat, gs_exact_source)
+
+in_prot_enriched = get_enriched_terms(
+  term2gene        = msig_c5,
+  add_universe_set = TRUE,
+  limma            = in_proteomics,
+  dataset_name     = "iNeurons_TDP43_KD_proteomics",
+  genename_col     = "external_gene_name",
+  return_single_df = TRUE
+) %>%
+  mutate(modality = "proteomics")
+
+in_rna_enriched = get_enriched_terms(
+  term2gene        = msig_c5,
+  add_universe_set = TRUE,
+  deseq            = in_rnaseq,
+  dataset_name     = "iNeurons_TDP43_KD_RNAseq",
+  genename_col     = "gene_name",
+  return_single_df = TRUE
+) %>%
+  mutate(modality = "RNAseq")
+
+all_enriched = bind_rows(pm_enrichment, in_prot_enriched, in_rna_enriched)
+```
+
+``` {r pathways_select}
+# these are selected from network enriched pathways -- unique to particular clusters
+pathways_of_interest = c(
+  "GOMF_RIBONUCLEOPROTEIN_COMPLEX_BINDING","GOCC_NUCLEAR_PORE","GOBP_NUCLEAR_TRANSPORT",
+  "GOCC_RIBONUCLEOPROTEIN_GRANULE","GOMF_MRNA_BINDING","GOBP_POSITIVE_REGULATION_OF_TRANSLATION","GOCC_SPLICEOSOMAL_COMPLEX",
+  "GOBP_SECOND_MESSENGER_MEDIATED_SIGNALING","GOMF_CALMODULIN_BINDING",
+  "GOMF_TRANSCRIPTION_COACTIVATOR_ACTIVITY","GOBP_REGULATION_OF_NEURON_DIFFERENTIATION","GOBP_CHROMATIN_REMODELING","GOMF_NUCLEOSOMAL_DNA_BINDING",
+  "GOBP_VESICLE_MEDIATED_TRANSPORT_IN_SYNAPSE","GOCC_EXOCYTIC_VESICLE","GOBP_SYNAPTIC_VESICLE_EXOCYTOSIS","GOBP_REGULATION_OF_SYNAPTIC_PLASTICITY","GOCC_TRANSPORT_VESICLE_MEMBRANE",
+  "GOCC_CELL_DIVISION_SITE","GOBP_CYTOKINESIS","GOBP_RECOMBINATIONAL_REPAIR",
+  "GOBP_PHOSPHOLIPID_METABOLIC_PROCESS","GOBP_PHOSPHOLIPID_BIOSYNTHETIC_PROCESS","GOBP_IMPORT_ACROSS_PLASMA_MEMBRANE",
+  "GOBP_CELLULAR_RESPIRATION","GOMF_ELECTRON_TRANSFER_ACTIVITY","GOCC_MITOCHONDRIAL_PROTEIN_CONTAINING_COMPLEX","GOCC_OXIDOREDUCTASE_COMPLEX",
+  "GOBP_DENDRITE_DEVELOPMENT","GOMF_GTPASE_BINDING","GOBP_REGULATION_OF_ACTIN_FILAMENT_ORGANIZATION","GOBP_POSITIVE_REGULATION_OF_NERVOUS_SYSTEM_DEVELOPMENT",
+  "GOBP_REGULATION_OF_MICROTUBULE_POLYMERIZATION_OR_DEPOLYMERIZATION","GOCC_MICROTUBULE_ASSOCIATED_COMPLEX","GOBP_NEURON_PROJECTION_ORGANIZATION","GOBP_CLATHRIN_DEPENDENT_ENDOCYTOSIS",
+  "GOBP_MACROAUTOPHAGY","GOBP_REGULATION_OF_MACROAUTOPHAGY","GOCC_EARLY_ENDOSOME_MEMBRANE",
+  "GOCC_COATED_VESICLE","GOBP_EXOCYTIC_PROCESS","GOMF_GTPASE_ACTIVITY",
+  "GOBP_VACUOLE_ORGANIZATION","GOBP_ORGANELLE_DISASSEMBLY","GOBP_AUTOPHAGOSOME_ORGANIZATION"
+)
+
+# Map each pathway to the single most-enriched network cluster
+cluster_lookup = net_clusters_min %>%
+  filter(ID %in% pathways_of_interest) %>%
+  select(ID, Cluster) %>%
+  rename(associated_cluster = Cluster)
+
+# Cluster order for panels -- grouped by metacluster
+cluster_panel_order = c("0","1","3","8","4","11","9","5","12","10","7","6","2") 
+cluster_lookup = cluster_lookup %>%
+  mutate(associated_cluster2 = factor(associated_cluster, levels = cluster_panel_order))
+```
+
+## Highlighting splice genes
+``` {r splice_genes}
+
+nodes_table = read_tsv(path_nodes_table, show_col_types = FALSE)
+splice_net_v2 = nodes_table %>%
+  filter(gene_DS_status == "DS") %>%
+  pull(gene_name) %>%
+  unique()
+
+# Augment with high-confidence splicing compendium genes present in network
+# 10 additional genes
+splicing_compendium = read_tsv(path_splicing_comp, show_col_types = FALSE)
+augment = splicing_compendium %>%
+  filter(num_datasets_misspliced >= 2,
+         num_datasets_cryptic   >= 2,
+         misspliced_postmortem,
+         !misspliced__iN_TDP43KD_ours) %>%
+  pull(gene_name)
+
+splice_net_v3 = union(splice_net_v2, intersect(nodes_table$gene_name, augment))
+
+# Final splice gene set to use for highlighting
+splice_genes_use = unique(splice_net_v3)
+length(splice_genes_use)
+```
+
+``` {r helper}
+# Data helper
+prepare_enrichment_df = function(enrich_df,
+                                  modality_keep = c("proteomics","RNAseq"),
+                                  pathways_keep,
+                                  cluster_map,
+                                  cluster_levels,
+                                  dataset_levels,
+                                  dataset_labels,
+                                  dataset_type_map,
+                                  q_threshold = params$q_threshold,
+                                  splice_genes = character()) {
+
+  stopifnot(length(dataset_levels) == length(dataset_labels))
+
+  df = enrich_df %>%
+    filter(modality %in% modality_keep,
+           ID %in% pathways_keep,
+           !is.na(qvalue),
+           qvalue < q_threshold) %>%
+    left_join(cluster_map, by = "ID") %>%
+    arrange(associated_cluster, ID) %>%
+    mutate(
+      associated_cluster = factor(associated_cluster, levels = cluster_levels),
+      ID                 = factor(ID, levels = rev(unique(ID))),   # reverse for "flipped" display
+      dataset            = factor(dataset, levels = dataset_levels),
+      dataset_type       = dplyr::recode(dataset, !!!dataset_type_map),    # panel column
+      neg_log10_q        = -log10(qvalue),
+      direction          = subset,
+      signed_neglog10q   = ifelse(direction == "negative", -neg_log10_q, neg_log10_q)
+    ) %>%
+    filter(direction != 'all')  # drop those that aren't directional
+
+  # highlight if any genes overlap splice set; also record which ones
+  df = df %>%
+    rowwise() %>%
+    mutate(
+      highlight_net   = any(str_split(geneID, "/")[[1]] %in% splice_genes),
+      net_splice_genes= paste(intersect(str_split(geneID, "/")[[1]], splice_genes), collapse = "/")
+    ) %>%
+    ungroup() %>%
+    mutate(
+      xlabels = fct_relabel(dataset, ~dataset_labels[match(.x, dataset_levels)])
+    )
+
+  df
+}
+
+```
+
+```{r prot_parameters}
+
+q_threshold = 0.05
+
+color_limits = c(-12, 4)
+size_limits = c(5, 200)
+
+```
+
+## Proteomics postmortem datasets
+``` {r proteomics_pm}
+prot_dataset_levels = c(
+  "iNeurons_TDP43_KD_proteomics",
+  "C9_FTLD",
+  "Umoh_FTD",
+  "Guise_ALS_MNs_Non",
+  "Guise_ALS_MNs_Mld",
+  "Guise_ALS_MNs_Mod",
+  "Guise_ALS_MNs_Sev"
+)
+prot_dataset_labels = c(
+  "iNeurons TDP-43 KD",
+  "C9 FTLD FTD FC",
+  "Umoh et al. PM FTD FC",
+  "Guise et al. PM ALS SC \nNon vs. Ctl",
+  "Guise et al. PM ALS SC \nMld vs. Ctl",
+  "Guise et al. PM ALS SC \nMod vs. Ctl",
+  "Guise et al. PM ALS SC \nSev vs. Ctl"
+)
+# map dataset -> dataset_type (facet columns)
+prot_type_map = c(
+  iNeurons_TDP43_KD_proteomics = "iNeuron",
+  C9_FTLD                      = "PM_Cortex",
+  Umoh_FTD                     = "PM_Cortex",
+  Guise_ALS_MNs_Non            = "PM_SpinalCord",
+  Guise_ALS_MNs_Mld            = "PM_SpinalCord",
+  Guise_ALS_MNs_Mod            = "PM_SpinalCord",
+  Guise_ALS_MNs_Sev            = "PM_SpinalCord"
+)
+
+prot_df = prepare_enrichment_df(
+  enrich_df        = all_enriched,
+  modality_keep    = "proteomics",
+  pathways_keep    = pathways_of_interest,
+  cluster_map      = cluster_lookup,
+  cluster_levels   = cluster_panel_order,
+  dataset_levels   = prot_dataset_levels,
+  dataset_labels   = prot_dataset_labels,
+  dataset_type_map = prot_type_map,
+  q_threshold      = q_threshold,
+  splice_genes     = splice_genes_use
+)
+
+# Pad each panel with all pathway IDs seen in that cluster (keeps facet grids aligned)
+prot_df_padded = pad_panel(ids_union = cluster_lookup %>% distinct(associated_cluster2, ID),
+                            df = prot_df)
+
+p_prot = base_dotplot(prot_df_padded, signed_neglog10q, highlight_net) +
+  # some additional customization
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       limits = color_limits,
+                       midpoint = 0, na.value = "grey90",
+                       name = "signed\n-log10(q)") +
+  scale_size_continuous(limit = size_limits) +
+  # theme_bw() +
+  theme(
+    axis.text.y      = element_blank(),
+    axis.ticks.y     = element_blank(),
+    legend.position  = "right") 
+p_prot
+
+```
+
+## RNAseq postmortem datasets
+
+``` {r rnaseq_pm}
+
+# limits for min log q-values in RNA enrichments
+rna_cap = 20
+
+rna_dataset_levels = c(
+  "iNeurons_TDP43_KD_RNAseq",
+  "NYGC_FTLD_FrontalCortex",
+  "NYGC_FTLD_TemporalCortex",
+  "Liu_FTDALS",
+  "NYGC_ALS_FrontalCortex",
+  "NYGC_ALS_MotorCortex",
+  "NYGC_ALS_Cervical_SC",
+  "NYGC_ALS_Lumbar_SC"
+)
+rna_dataset_labels = c(
+  "iNeurons TDP-43 KD",
+  "NYGC FTLD Frontal Cortex",
+  "NYGC FTLD Temporal Cortex",
+  "Liu et al. FTD-ALS\nFC (TDP- vs. TDP+)",
+  "NYGC ALS Frontal Cortex",
+  "NYGC ALS Motor Cortex",
+  "NYGC ALS Cervical SC",
+  "NYGC ALS Lumbar SC"
+)
+rna_type_map = c(
+  iNeurons_TDP43_KD_RNAseq = "iNeuron",
+  NYGC_FTLD_FrontalCortex  = "PM_Cortex",
+  NYGC_FTLD_TemporalCortex = "PM_Cortex",
+  Liu_FTDALS               = "PM_Cortex",
+  NYGC_ALS_FrontalCortex   = "PM_Cortex",
+  NYGC_ALS_MotorCortex     = "PM_Cortex",
+  NYGC_ALS_Cervical_SC     = "PM_SpinalCord",
+  NYGC_ALS_Lumbar_SC       = "PM_SpinalCord"
+)
+
+rna_df = prepare_enrichment_df(
+  enrich_df        = all_enriched,
+  modality_keep    = "RNAseq",
+  pathways_keep    = pathways_of_interest,
+  cluster_map      = cluster_lookup,
+  cluster_levels   = cluster_panel_order,
+  dataset_levels   = rna_dataset_levels,
+  dataset_labels   = rna_dataset_labels,
+  dataset_type_map = rna_type_map,
+  q_threshold      = q_threshold,
+  splice_genes     = splice_genes_use
+) %>%
+  # Cap extremes for display symmetry, as in your notes
+  mutate(signed_neglog10q = pmax(-rna_cap, pmin(rna_cap, signed_neglog10q)))
+
+rna_df_padded = pad_panel(ids_union = cluster_lookup %>% distinct(associated_cluster2, ID),
+                           df = rna_df)
+
+# p_rna = build_dotplot(
+#   df                = rna_df_padded,
+#   fill_column       = "signed_neglog10q",
+#   highlight_column  = "highlight_net",
+#   color_limits      = c(-params$rna_cap, params$rna_cap),
+#   size_limits       = params$size_limits,
+#   hide_y_axis       = FALSE
+# )
+
+p_rna = base_dotplot(rna_df_padded, signed_neglog10q, highlight_net) +
+  # some additional customization
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       limits = c(-rna_cap, rna_cap),
+                       midpoint = 0, na.value = "grey90",
+                       name = "signed\n-log10(q)") +
+  scale_size_continuous(limit = size_limits) +
+  theme(
+    # axis.text.y      = element_blank(),
+    # axis.ticks.y     = element_blank(),
+    legend.position  = "right") 
+p_rna
+
+```
+## Figure 5 panel A
+``` {r combined}
+cowplot::plot_grid(
+  p_rna, p_prot, ncol = 2, align = "h", axis = "bt",
+  rel_widths = c(2.1, 1)
+)
+```
+
+``` {r save}
+# ggsave(
+#   filename = here("fig5_prot_rna_postmortem_combined_a.pdf"),
+#   plot     = cowplot::plot_grid(p_rna, p_prot, ncol = 2, align = "h", axis = "bt", rel_widths = c(2.1, 1)),
+#   width    = 15, height = 9, units = "in", device = cairo_pdf
+# )
+```
+
+## Generating heatmap of diff. expression
+
+First read in all DE results, including iNeuron data.
+
+``` {r de_data}
+pm_de = read_tsv(path_table_pm_de, show_col_types = FALSE)
+
+# Add back the ineuron DE
+in_de_all = list(in_rnaseq, in_proteomics)
+
+compiled_de_ineurons = compile_DE_results(results_list = in_de_all,
+                                          names = c('iNeurons_TDP43_KD_RNAseq', 'iNeurons_TDP43_KD_proteomics'),
+                                          genecols = c('gene_name', 'external_gene_name'),
+                                          modalities = c('RNA', 'prot')
+                                          )
+# none duplicated here
+
+all_de_annotated = merge(compiled_de_ineurons, pm_de, by = 'external_gene_name', all = T) %>%
+  merge(nodes_table, by.x = 'external_gene_name', by.y = 'gene_name', all = T) %>%
+  mutate(Gene_DS = gene_DS_status)
+
+```
+``` {r select_heatmap_genes}
+# Filter for iNeuron proteomics log2FC > 0.5
+# Identify iNeuron proteomics column
+ineuron_prot_col <- grep("^log2fc__prot__iNeuron", names(all_de_annotated), value=TRUE)
+
+df_filtered <- all_de_annotated %>%
+  filter(abs(!!sym(ineuron_prot_col)) > 0.5 & 
+           adjpval__prot__iNeurons_TDP43_KD_proteomics < 0.05)
+
+#  Build a long dataframe of adj p-values for all other datasets
+adjp_long <- df_filtered %>%
+  pivot_longer(
+    cols = starts_with("adjpval__"),
+    names_to = c("metric","modality","dataset"),
+    names_sep = "__",
+    values_to = "adj_pval"
+  ) %>%
+  filter(!str_detect(dataset, regex("iNeuron", ignore_case=TRUE))) %>%  # exclude iNeuron
+  mutate(
+    modality = ifelse(modality=="prot","Proteomics","RNA"),
+    is_signif = adj_pval < 0.05
+  )
+
+# Summarize counts of significant hits per modality
+summary_counts <- adjp_long %>%
+  group_by(external_gene_name, modality) %>%
+  summarise(n_signif = sum(is_signif, na.rm=TRUE), .groups="drop") %>%
+  pivot_wider(
+    names_from = modality,
+    values_from = n_signif,
+    values_fill = 0
+  )
+
+# 
+genes_passing <- summary_counts %>%
+  filter(
+    # Criteria A: at least 2 in each modality
+    (Proteomics >=2 & RNA >=2) |
+      # OR Criteria B: at least 4 in any modality
+      (Proteomics >=4 | RNA >=4)
+  ) %>%
+  pull(external_gene_name)
+```
+
+## Filter out some genes and include those previously examined/missed by this criteria
+
+```{r filter_genes}
+# for V2 of the figures
+genes_exclude2 = c(
+  'TSPYL4', 'TSPAN13', 'SLC9A6', 'APLP2', 'PKN1', 'RAB12', 'CPE',  'SLC1A1', 
+  'ARMC10', 'NPM3', 'POLB', 'RUNDC3B', 'POLR3C', 'ALCAM', 'SMC5', 'ABI2', 'TMEM35A',
+  'PARP2', 'CORO1C', 'RAB3B', 'HSDL1', 'FMNL1', 'IPO13', 'WDR3', 'ACTR1A', 'DYNLT3', 'REPS1',
+  'CPT1C', 'CEMIP2', 'CRABP1', 'DPF3',
+  'OSTF1', 'GNB4', 'PDZD11', 'ATP8A1'
+)
+
+# plotted previously
+other_genes_add = c('STMN2', 'ATG4B', 'CYFIP1', 'KALRN', 'SYT7', 'UNC13A', 'ACTL6B',
+                    'CELF5', 'MADD', 'TARDBP', 'GABARAP', 'ZNF462',
+                     'POLDIP3', 'MYO18A', 'DCTN2' )
+
+# Final genes to plot
+genes_of_interest <- df_filtered %>%
+  filter(external_gene_name %in% genes_passing) %>%
+  filter(external_gene_name %in% nodes_table$gene_name) %>%  # also make sure these are in network
+  filter(!external_gene_name %in% genes_exclude2) %>%
+  pull(external_gene_name)
+
+# genes_of_interest
+
+genes_of_interest2 = union(genes_of_interest, other_genes_add)
+
+# which ones had to be forced in?
+print(setdiff(other_genes_add, genes_of_interest))
+# "STMN2"  "CYFIP1" "KALRN"  "ACTL6B" "TARDBP"  "POLDIP3" "MYO18A" 
+
+length(genes_of_interest2)
+# 58 genes in end
+
+```
+
+``` {r colors_annotation}
+# Define some custom colors
+custom_anno_colors <- list(
+  Gene_DS = c(
+    "DS"    = "grey20",  
+    "No DS" = "grey90"   
+  ),
+  leiden_clusters = c(
+    # Red family (0, 1, 3)
+    "0" = "#F94144",  # fire red
+    "1" = "pink",  # orange red
+    "3" = "magenta",  # amber
+    
+    # Blue family (8, 4, 11, 5, 9)
+    "8"  = "#577590",  # steel blue
+    "4"  = "#277DA1",  # deep ocean
+    "11" = "skyblue",  # teal blue
+    "5"  = "turquoise",  # sea green
+    "9"  = "navy",  # soft lime
+    
+    # Green family (12, 10)
+    "12" = "limegreen",  # turquoise
+    "10" = "#55A630",  # vibrant green
+    
+    # Yellow family (7, 6, 2, 13)
+    "7"  = "#F9C74F",  # sunflower yellow
+    "6"  = "yellow",  # orange gold
+    "2"  = "lightyellow",  # pastel yellow
+    "13" = "gold"   # lemon yellow
+  ),
+  meta_cluster = c(
+    'Nuclear/RBP/TF' = '#CC5EA3',
+    'Synaptic/ neuron' = '#AEE2F8',
+    'Autophagy' = '#009444',
+    'Metabolism' = '#FFDE17'
+  ),
+  # 'DEP + DS', 'DEP + DEG, no DS', 'DEP only'
+  Fig1_plot_group = c(
+    'DEP + DS'         = "#B22222",  # brick-red
+    'DEP + DEG, no DS' = "#20B2AA",  # turquoise
+    'DEP, no DEG, no DS'  = "#FFA500"   # orange-yellow
+  )
+)
+```
+
+``` {r heatmap}
+
+hm = plot_multiomic_heatmap_genes_x(
+  df              = all_de_annotated,
+  genes           = genes_of_interest2,
+  custom_anno_colors = custom_anno_colors,
+  gene_group_col =  'meta_cluster',            # or NULL
+  col_anno_cols   = c('meta_cluster', 'Gene_DS'),            # or NULL
+  modality_colours = c(RNA = "#1f77b4", Proteomics = "#d95f02"),
+  cluster_rows = F,
+  cluster_columns = T,
+  gene_label_angle = 75,
+  legends_below = F
+)
+
+```
+
+
+``` {r save_heatmap}
+pdf(here("fig5_prot_rna_postmortem_combined_b.pdf"),
+    width = 17, height = 6, useDingbats = F)
+print(hm)
+dev.off()
+
+```
